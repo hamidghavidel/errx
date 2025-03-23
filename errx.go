@@ -2,102 +2,143 @@ package errx
 
 import (
 	"context"
-	"errors"
+	"fmt"
+	"github.com/pkg/errors"
 )
+
+type Property func(err error) error
 
 type CustomError struct {
 	base       error
-	message    string
-	httpCode   int
-	customCode int
-	ctx        context.Context
+	Message    string
+	HTTPCode   int
+	CustomCode int
+	CTX        context.Context
 }
 
-// New returns a new error with the given message.
-func New(msg string) error {
-	return &CustomError{
-		message: msg,
-		ctx:     context.Background(),
+// Error returns a formatted string representation of the CustomError.
+// It concatenates the error message from the base error (if available)
+// with the message of the CustomError itself, separated by a colon.
+func (e CustomError) Error() string {
+	baseErrMsg := ""
+	if e.base != nil {
+		baseErrMsg = e.base.Error()
 	}
-}
-
-// Error returns the error message.
-func (e *CustomError) Error() string {
-	return e.message
-}
-
-// Unwrap returns the underlying base error of the CustomError.
-// It allows access to the wrapped error for further inspection or handling.
-func (e *CustomError) Unwrap() error {
-	return e.base
-}
-
-// Is reports whether the given error is equal to e.
-// It returns true if the two errors are the same, and false otherwise.
-func (e *CustomError) Is(err error) bool {
-	return errors.Is(e.base, err)
-}
-
-// As attempts to set the target to the underlying error if it matches the type.
-// It returns true if the target was set, and false otherwise.
-func (e *CustomError) As(target interface{}) bool {
-	return errors.As(e.Unwrap(), target)
-}
-
-// Wrap sets the underlying error of e to the given error and returns the error.
-// It is intended to be used to record the cause of the error.
-func (e *CustomError) Wrap(err error) error {
-	e.base = err
-	return err
-}
-
-// HTTPCode returns the HTTP status code of the error.
-// If the code is not explicitly set through `WithHttpCode`, it returns 0.
-func (e *CustomError) HTTPCode() int {
-	return e.httpCode
-}
-
-// CustomCode returns the custom error code of the error.
-// If the code is not explicitly set through `WithCustomCode`, it returns 0.
-func (e *CustomError) CustomCode() int {
-	return e.customCode
+	return fmt.Sprintf("%s: %s", baseErrMsg, e.Message)
 }
 
 // Cause returns the underlying base error of the CustomError.
 // It provides access to the original error that caused the CustomError.
-func (e *CustomError) Cause() error {
+func (e CustomError) Cause() error {
 	return e.base
 }
 
-// Context returns the context associated with the CustomError.
-// If no context was associated with the error, it returns the background context.
-func (e *CustomError) Context() context.Context {
-	return e.ctx
+// New creates a new error with the given message and applies the given properties.
+// If no properties are given, it will simply return a wrapped error with the given message.
+// Otherwise, it will apply the properties to the error and return the modified error.
+func New(msg string, properties ...Property) error {
+	if len(properties) == 0 {
+		return errors.New(msg)
+	}
+
+	var result error = CustomError{
+		Message: msg,
+		CTX:     context.Background(),
+	}
+
+	for _, property := range properties {
+		result = property(result)
+	}
+
+	return result
 }
 
-// WithHttpCode sets the HTTP status code of the CustomError to the provided value.
-// It returns the updated error with the new HTTP status code, allowing chaining
-// of method calls. The HTTP status code can be retrieved later using the HTTPCode
-// method.
-func (e *CustomError) WithHttpCode(httpCode int) error {
-	e.httpCode = httpCode
-	return e
+// Wrap wraps the given error with the given message and applies the given properties.
+// If the given error is a CustomError, it wraps the error and applies the properties.
+// Otherwise, it uses errors.Wrap to wrap the error with the given message.
+func Wrap(err error, msg string, properties ...Property) error {
+	if err == nil {
+		return nil
+	}
+
+	var customErr CustomError
+	if errors.As(err, &customErr) {
+		var result error = &CustomError{
+			base:    customErr,
+			Message: msg,
+		}
+
+		for _, property := range properties {
+			result = property(result)
+		}
+
+		return result
+	}
+
+	return errors.Wrap(err, msg)
 }
 
-// WithCustomCode sets the custom error code of the CustomError to the provided value.
-// It returns the updated error with the new custom error code, allowing chaining
-// of method calls. The custom error code can be retrieved later using the CustomCode
-// method.
-func (e *CustomError) WithCustomCode(customCode int) error {
-	e.customCode = customCode
-	return e
+// WithHTTPCode returns a Property that sets the HTTP code of an error.
+// If the error is a CustomError, it updates the HTTPCode of the existing error.
+// Otherwise, it creates a new CustomError with the specified HTTP code.
+func WithHTTPCode(httpCode int) Property {
+	return func(err error) error {
+		var customErr CustomError
+		if errors.As(err, &customErr) {
+			customErr.HTTPCode = httpCode
+
+			return customErr
+		}
+
+		return CustomError{
+			Message:  err.Error(),
+			HTTPCode: httpCode,
+		}
+	}
 }
 
-// WithContext sets the context of the CustomError to the provided context.
-// It returns the updated error with the new context, allowing chaining
-// of method calls. The context can be retrieved later using the Context
-// method.
-func (e *CustomError) WithContext(ctx context.Context) error {
-	e.ctx = ctx
-	return e
+// WithCustomCode returns a Property that sets the custom code of an error.
+// If the error is a CustomError, it updates the CustomCode of the existing error.
+// Otherwise, it creates a new CustomError with the specified custom code.
+func WithCustomCode(customCode int) Property {
+	return func(err error) error {
+		var customErr CustomError
+		if errors.As(err, &customErr) {
+			customErr.CustomCode = customCode
+
+			return customErr
+		}
+
+		return CustomError{
+			Message:    err.Error(),
+			CustomCode: customCode,
+		}
+	}
 }
+
+// WithContext returns a Property that sets the context of an error.
+// If the error is a CustomError, it updates the CTX of the existing error.
+// Otherwise, it creates a new CustomError with the specified context.
+func WithContext(ctx context.Context) Property {
+	return func(err error) error {
+		var customErr CustomError
+		if errors.As(err, &customErr) {
+			customErr.CTX = ctx
+
+			return customErr
+		}
+
+		return CustomError{
+			Message: err.Error(),
+			CTX:     ctx,
+		}
+	}
+}
+
+// Is reports whether any error in err's chain has the same value as target.
+// This function is a wrapper around pkg/errors.Is.
+func Is(err, target error) bool { return errors.Is(err, target) }
+
+// As reports whether the error err satisfies the predicate target.
+// This function is a wrapper around pkg/errors.As.
+func As(err error, target any) bool { return errors.As(err, target) }
